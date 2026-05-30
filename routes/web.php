@@ -1,11 +1,11 @@
 <?php
+
 use App\Http\Controllers\EmergencyController;
 use Illuminate\Support\Facades\Route;
 use Livewire\Volt\Volt;
 // use App\Livewire\EmergencyDashboard;
 // use App\Livewire\EmergencyTrigger;
-Route::view('/', 'welcome');
-
+Volt::route('/', 'pages.auth.login');
 Route::view('dashboard', 'dashboard')
     ->middleware(['auth', 'verified'])
     ->name('dashboard');
@@ -18,13 +18,13 @@ Route::get('/test-trigger', [EmergencyController::class, 'trigger']);
 Volt::route('/emergency/dashboard', 'emergency_dashboard')
     ->name('emergency.dashboard')
     ->middleware(['auth']);
-    Volt::route('/emergency/trigger', 'emergency_trigger')
+Volt::route('/emergency/trigger', 'emergency_trigger')
     ->name('emergency.trigger')
     ->middleware(['auth']);
-    Volt::route('/emergency/contacts', 'emergency_contacts')
+Volt::route('/emergency/contacts', 'emergency_contacts')
     ->name('emergency.contacts')
     ->middleware(['auth']);
-require __DIR__.'/auth.php';
+require __DIR__ . '/auth.php';
 Route::get('/test-broadcast', function () {
     $data = [
         'id' => rand(1, 100),
@@ -34,8 +34,8 @@ Route::get('/test-broadcast', function () {
         'notes' => 'Testing dari browser',
         'triggered_at' => now()->toDateTimeString()
     ];
-    
+
     broadcast(new \App\Events\EmergencyTriggered($data));
-    
+
     return "Event dikirim ke Reverb!";
 });
