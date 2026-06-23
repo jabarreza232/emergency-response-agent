@@ -3,6 +3,9 @@
 use Livewire\Volt\Component;
 use App\Models\EmergencyLog;
 use App\Models\UserNotification; 
+use App\Models\Hospital;
+use App\Models\PoliceStation;
+use App\Models\FireStation;
 use Livewire\WithPagination;
 use Livewire\Attributes\Layout;
 use Illuminate\Support\Facades\Session;
@@ -16,9 +19,27 @@ new #[Layout('layouts.app')] class extends Component
     use WithPagination;
 
     public $alerts = [];
+    public $latestLogId = null; // Menyimpan ID laporan terakhir
+
+    public function mount()
+    {
+        // Set ID laporan terakhir saat pertama kali halaman dimuat
+        $this->latestLogId = EmergencyLog::max('id');
+    }
 
     public function with(): array
     {
+        // PENDETEKSI LAPORAN BARU (Realtime via Polling)
+        $currentMaxId = EmergencyLog::max('id');
+        
+        if ($this->latestLogId !== null && $currentMaxId > $this->latestLogId) {
+            // Jika ada ID baru yang lebih besar, bunyikan alarm!
+            $this->dispatch('trigger-alarm');
+            $this->latestLogId = $currentMaxId; // Update ID terakhir
+        } elseif ($this->latestLogId === null) {
+            $this->latestLogId = $currentMaxId;
+        }
+
         return [
             'logs' => EmergencyLog::with('user')
                 ->orderBy('triggered_at', 'desc')
@@ -29,6 +50,11 @@ new #[Layout('layouts.app')] class extends Component
                 'active_emergencies' => EmergencyLog::whereNotIn('status', ['resolved', 'cancelled'])->count(),
                 'resolved_emergencies' => EmergencyLog::where('status', 'resolved')->count(),
             ],
+
+            // Mengambil semua data fasilitas untuk dikirim ke peta JavaScript
+            'hospitals' => Hospital::where('is_active', true)->get(['id', 'name', 'latitude', 'longitude', 'phone']),
+            'policeStations' => PoliceStation::where('is_active', true)->get(['id', 'name', 'latitude', 'longitude', 'phone']),
+            'fireStations' => FireStation::where('is_active', true)->get(['id', 'name', 'latitude', 'longitude', 'phone']),
         ];
     }
 
@@ -82,6 +108,9 @@ new #[Layout('layouts.app')] class extends Component
         if (count($this->alerts) > 5) {
             array_pop($this->alerts);
         }
+
+        // Memicu event browser untuk membunyikan alarm di Frontend (Jika pakai WebSocket/Echo)
+        $this->dispatch('trigger-alarm');
     }
 
     public function closeAlert($index)
@@ -92,13 +121,89 @@ new #[Layout('layouts.app')] class extends Component
 }; 
 ?>
 
-<div>
+<div class="min-h-screen bg-slate-900 pb-12" wire:poll.5s>
     @assets
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     @endassets
 
-    <div class="min-h-screen bg-slate-900 pb-12">
+    {{-- File Audio Sirine Lokal --}}
+    <audio id="emergency-siren" loop preload="auto">
+        <source src="{{ asset('audio/sirine.mp3') }}" type="audio/mpeg">
+    </audio>
+
+    {{-- State Alpine untuk Sistem Alarm dengan Audio Unlocker Mutlak --}}
+    <div class="min-h-screen bg-slate-900 pb-12" 
+         x-data="{
+            isAlarmRinging: false,
+            alarmTimeout: null,
+            audioUnlocked: false,
+            
+            unlockAudio() {
+                if (this.audioUnlocked) return;
+                
+                this.audioUnlocked = true; 
+                
+                let siren = document.getElementById('emergency-siren');
+                if (siren) {
+                    siren.muted = true;
+                    siren.play().then(() => {
+                        siren.pause();
+                        siren.currentTime = 0;
+                        siren.muted = false; 
+                    }).catch(e => {
+                        console.log('Menunggu klik pengguna...');
+                    });
+                }
+            },
+
+            playAlarm() {
+                let siren = document.getElementById('emergency-siren');
+                if (siren) {
+                    siren.muted = false;
+                    siren.play().then(() => {
+                        this.audioUnlocked = true;
+                    }).catch(e => {
+                        console.warn('Autoplay dicegah browser! Harap klik halaman.');
+                        this.audioUnlocked = false; 
+                    });
+                    
+                    this.isAlarmRinging = true;
+                    
+                    clearTimeout(this.alarmTimeout);
+                    this.alarmTimeout = setTimeout(() => {
+                        this.stopAlarm();
+                    }, 300000);
+                }
+            },
+            
+            stopAlarm() {
+                let siren = document.getElementById('emergency-siren');
+                if (siren) {
+                    siren.pause();
+                    siren.currentTime = 0;
+                }
+                this.isAlarmRinging = false;
+                clearTimeout(this.alarmTimeout);
+            }
+         }" 
+         @click.window="unlockAudio()"
+         @trigger-alarm.window="playAlarm()">
+
+        {{-- Banner Peringatan Izin Audio --}}
+        <div x-show="!audioUnlocked" x-transition class="bg-blue-600 border-b border-blue-500 text-white text-center py-2 px-4 text-xs font-bold cursor-pointer hover:bg-blue-700 transition flex items-center justify-center gap-2 z-[999] relative">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5 animate-pulse"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" /></svg>
+            Sistem membutuhkan izin suara. Klik di mana saja pada halaman ini untuk mengaktifkan sirine otomatis.
+        </div>
+
+        {{-- Tombol Matikan Alarm Mengambang --}}
+        <div x-show="isAlarmRinging" x-transition.opacity style="display: none;" class="fixed top-6 left-1/2 transform -translate-x-1/2 z-[600]">
+            <button @click="stopAlarm()" class="bg-red-600 animate-pulse hover:bg-red-700 text-white px-6 py-2.5 rounded-full font-bold shadow-[0_0_20px_rgba(239,68,68,0.6)] flex items-center gap-2 border-2 border-red-400">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 0 0 1.5 12c0 .898.121 1.768.35 2.595.341 1.24 1.518 1.905 2.659 1.905h1.93l4.5 4.5c.945.945 2.561.276 2.561-1.06V4.06ZM18.584 5.106a.75.75 0 0 1 1.06 0c3.808 3.807 3.808 9.98 0 13.788a.75.75 0 0 1-1.06-1.06 8.25 8.25 0 0 0 0-11.668.75.75 0 0 1 0-1.06Z" /><path d="M15.932 7.757a.75.75 0 0 1 1.061 0 6 6 0 0 1 0 8.486.75.75 0 0 1-1.06-1.061 4.5 4.5 0 0 0 0-6.364.75.75 0 0 1 0-1.06Z" /></svg>
+                Matikan Sirine
+            </button>
+        </div>
+
         {{-- REAL-TIME TOAST ALERTS --}}
         <div class="fixed top-20 right-5 z-[100] flex flex-col gap-3 w-full max-w-sm">
             @foreach($alerts as $index => $alert)
@@ -110,7 +215,7 @@ new #[Layout('layouts.app')] class extends Component
                     <p class="text-xs font-semibold opacity-90">Tipe: {{ ucfirst($alert['type']) }}</p>
                     <p class="text-[11px] opacity-75 mt-1">Koordinat: {{ $alert['latitude'] }}, {{ $alert['longitude'] }}</p>
                 </div>
-                <button wire:click="closeAlert({{ $index }})" class="text-white hover:text-red-200 font-bold text-lg leading-none">&times;</button>
+                <button wire:click="closeAlert({{ $index }})" @click="stopAlarm()" class="text-white hover:text-red-200 font-bold text-lg leading-none">&times;</button>
             </div>
             @endforeach
         </div>
@@ -127,7 +232,6 @@ new #[Layout('layouts.app')] class extends Component
             </div>
             
             <div class="flex items-center gap-4">
-                
                 {{-- MENU MASTER DATA --}}
                 <div class="relative" x-data="{ openMaster: false }">
                     <button @click="openMaster = !openMaster" @click.outside="openMaster = false" class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-800 transition text-slate-300 hover:text-white">
@@ -282,14 +386,27 @@ new #[Layout('layouts.app')] class extends Component
 
                                 <div class="flex gap-2 w-full mt-2 pt-4 border-t border-slate-700/50">
                                     @if($log->latitude && $log->longitude)
-                                    <button onclick="window.focusEmergency({{ $log->latitude }}, {{ $log->longitude }}, {{ $log->id }})" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2">
+                                    <button onclick="window.focusEmergency({{ $log->latitude }}, {{ $log->longitude }}, {{ $log->id }}, '{{ $log->emergency_type }}')" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2">
                                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.565 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" /></svg> Fokus Peta
                                     </button>
                                     @endif
 
                                     @if($log->status !== 'resolved' && $log->status !== 'cancelled')
-                                    <button wire:click="resolveEmergency({{ $log->id }})" class="flex-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/50 text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg> Selesaikan
+                                    <button wire:click="resolveEmergency({{ $log->id }})" 
+                                            wire:confirm="Yakin ingin menandai laporan ini sebagai Selesai?"
+                                            wire:loading.attr="disabled"
+                                            class="flex-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/50 text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                                        
+                                        <span wire:loading.remove wire:target="resolveEmergency({{ $log->id }})" class="flex items-center gap-1.5">
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg> 
+                                            Selesaikan
+                                        </span>
+                                        
+                                        <span wire:loading wire:target="resolveEmergency({{ $log->id }})" class="flex items-center gap-1.5">
+                                            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                            Memproses...
+                                        </span>
+                                        
                                     </button>
                                     @endif
                                 </div>
@@ -322,11 +439,26 @@ new #[Layout('layouts.app')] class extends Component
         <div id="map-data-bridge" data-markers="{{ $bridgeData }}" class="hidden"></div>
 
         <script>
+            // Data Fasilitas dari PHP ke JS
+            window.facilityData = {
+                'hospital': @json($hospitals),
+                'police': @json($policeStations),
+                'fire': @json($fireStations)
+            };
+
+            // Definisi Ikon Fasilitas
+            var hospitalIcon = L.divIcon({ className: 'custom-div-icon', html: "<div style='background-color:#10b981; width:22px; height:22px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 0 0 10px rgba(16,185,129,0.5);'><b style='color:white; font-size:12px;'>H</b></div>", iconSize: [22, 22], iconAnchor: [11, 11] });
+            var policeIcon = L.divIcon({ className: 'custom-div-icon', html: "<div style='background-color:#3b82f6; width:22px; height:22px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 0 0 10px rgba(59,130,246,0.5);'><b style='color:white; font-size:12px;'>P</b></div>", iconSize: [22, 22], iconAnchor: [11, 11] });
+            var fireIcon = L.divIcon({ className: 'custom-div-icon', html: "<div style='background-color:#f97316; width:22px; height:22px; border-radius:50%; border:2px solid white; display:flex; align-items:center; justify-content:center; box-shadow: 0 0 10px rgba(249,115,22,0.5);'><b style='color:white; font-size:12px;'>F</b></div>", iconSize: [22, 22], iconAnchor: [11, 11] });
+
             document.addEventListener('livewire:initialized', () => {
                 const mapContainer = document.getElementById('history-map');
                 if (mapContainer) {
                     window.emergencyMap = L.map('history-map').setView([-6.3927, 106.8286], 11);
                     window.emergencyMarkers = {};
+                    
+                    // Group Layer untuk Fasilitas agar mudah dihapus/dibersihkan
+                    window.facilityLayerGroup = L.layerGroup().addTo(window.emergencyMap);
 
                     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
                         maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
@@ -362,7 +494,7 @@ new #[Layout('layouts.app')] class extends Component
                                     </div>
                                 `;
 
-                                let marker = L.marker([log.latitude, log.longitude], {icon: customIcon}).addTo(window.emergencyMap).bindPopup(popupContent);
+                                let marker = L.marker([log.latitude, log.longitude], {icon: customIcon, zIndexOffset: 1000}).addTo(window.emergencyMap).bindPopup(popupContent);
                                 window.emergencyMarkers[log.id] = marker;
                                 bounds.push([log.latitude, log.longitude]);
                             }
@@ -375,10 +507,90 @@ new #[Layout('layouts.app')] class extends Component
                     Livewire.hook('morph.updated', ({ el }) => { if (el.id === 'map-data-bridge') { window.updateMapMarkers(); } });
                 }
 
-                window.focusEmergency = function(lat, lng, id) {
+                // FUNGSI UPDATE MENDETEKSI TIPE DARURAT DAN RADIUS 5KM
+                window.focusEmergency = function(lat, lng, id, type) {
                     if (window.emergencyMap) {
-                        window.emergencyMap.setView([lat, lng], 17, { animate: true, duration: 1.5 });
-                        if (window.emergencyMarkers[id]) { window.emergencyMarkers[id].openPopup(); }
+                        
+                        // 1. Fokus Kamera Peta ke Laporan
+                        const emergencyLatLng = L.latLng(lat, lng);
+                        window.emergencyMap.setView(emergencyLatLng, 14, { animate: true, duration: 1.5 });
+                        
+                        if (window.emergencyMarkers[id]) { 
+                            window.emergencyMarkers[id].openPopup(); 
+                        }
+
+                        // 2. Bersihkan layer sebelumnya (marker fasilitas & lingkaran)
+                        window.facilityLayerGroup.clearLayers();
+
+                        // 3. Tentukan kategori fasilitas yang relevan
+                        let facTypeToShow = null;
+                        let facIcon = null;
+                        let facTitle = '';
+                        
+                        const typeLower = (type || '').toLowerCase();
+                        
+                        if (['kebakaran'].includes(typeLower)) {
+                            facTypeToShow = 'fire';
+                            facIcon = fireIcon;
+                            facTitle = 'Pemadam Kebakaran';
+                        } else if (['medis', 'cardiac', 'breathing', 'injury'].includes(typeLower)) {
+                            facTypeToShow = 'hospital';
+                            facIcon = hospitalIcon;
+                            facTitle = 'Fasilitas Medis';
+                        } else if (['kriminal', 'accident'].includes(typeLower)) {
+                            facTypeToShow = 'police';
+                            facIcon = policeIcon;
+                            facTitle = 'Kantor Polisi';
+                        }
+
+                        // 4. Proses Filter Radius 5 KM
+                        if (facTypeToShow && window.facilityData[facTypeToShow]) {
+                            const radiusInMeters = 5000; // 5 KM
+                            
+                            // A. Gambar Lingkaran Visual 5km di peta
+                            L.circle(emergencyLatLng, {
+                                color: '#3b82f6',
+                                fillColor: '#3b82f6',
+                                fillOpacity: 0.1,
+                                radius: radiusInMeters,
+                                weight: 1,
+                                interactive: false // Agar lingkaran tidak menghalangi klik marker
+                            }).addTo(window.facilityLayerGroup);
+
+                            let countFound = 0;
+
+                            // B. Filter dan tambahkan marker yang masuk radius
+                            window.facilityData[facTypeToShow].forEach(fac => {
+                                const facLatLng = L.latLng(fac.latitude, fac.longitude);
+                                const distanceMeters = emergencyLatLng.distanceTo(facLatLng);
+
+                                if (distanceMeters <= radiusInMeters) {
+                                    countFound++;
+                                    let distanceKm = (distanceMeters / 1000).toFixed(2);
+                                    
+                                    let popup = `
+                                        <div class="text-xs font-sans">
+                                            <b class='text-sm text-slate-800'>${fac.name}</b><br>
+                                            <span class='text-slate-500 font-bold uppercase text-[10px]'>${facTitle}</span><br>
+                                            <span class='text-slate-600 mt-1 block'>📞 ${fac.phone || '-'}</span>
+                                            <div class='mt-2 pt-1 border-t border-slate-200 text-blue-600 font-bold'>
+                                                📏 Jarak: ${distanceKm} KM
+                                            </div>
+                                        </div>
+                                    `;
+
+                                    L.marker(facLatLng, {icon: facIcon})
+                                     .addTo(window.facilityLayerGroup)
+                                     .bindPopup(popup);
+                                }
+                            });
+                            
+                            if(countFound === 0) {
+                                console.log(`Tidak ada fasilitas ${facTitle} yang ditemukan dalam radius 5km.`);
+                            }
+                        }
+
+                        // Auto scroll ke arah peta
                         document.getElementById('history-map').scrollIntoView({ behavior: 'smooth', block: 'center' });
                     }
                 };
