@@ -1,155 +1,72 @@
-
 <?php
 
 use Livewire\Volt\Component;
 use App\Models\EmergencyLog;
-use App\Models\EmergencyContact;
+use App\Models\UserNotification; 
 use Livewire\WithPagination;
 use Livewire\Attributes\Layout;
 use Illuminate\Support\Facades\Session;
-use App\DTOs\EmergencyRequestDTO;
-use App\Services\EmergencyResponseService;
+use Illuminate\Support\Facades\Auth;
 use function Livewire\Volt\{state, on};
 
-// State untuk menyimpan daftar log darurat yang masuk secara real-time
 state([]);
 
 new #[Layout('layouts.app')] class extends Component
 {
     use WithPagination;
 
-    // Dashboard State
-    public $showContactForm = false;
     public $alerts = [];
-    
-    // Trigger Form State
-    public $emergencyType = '';
-    public $notes = '';
-    public $latitude = null;
-    public $longitude = null;
-    public $locationEnabled = false;
-    public $processing = false;
-    public $error = null;
-    public $response = null;
-
-    // Contact Form Fields
-    public $contact_name = '';
-    public $contact_phone = '';
-    public $contact_relationship = '';
-    public $contact_email = '';
-    public $contact_priority = 1;
 
     public function with(): array
     {
         return [
-            'logs' => EmergencyLog::where('user_id', auth()->id())
-                ->with('user')
+            'logs' => EmergencyLog::with('user')
                 ->orderBy('triggered_at', 'desc')
                 ->paginate(10),
-            'contacts' => EmergencyContact::where('user_id', auth()->id())
-                ->orderBy('priority', 'asc')
-                ->get(),
+            
             'stats' => [
-                'total_emergencies' => EmergencyLog::where('user_id', auth()->id())->count(),
-                'active_emergencies' => EmergencyLog::where('user_id', auth()->id())->active()->count(),
-                'resolved_emergencies' => EmergencyLog::where('user_id', auth()->id())->resolved()->count(),
+                'total_emergencies' => EmergencyLog::count(),
+                'active_emergencies' => EmergencyLog::whereNotIn('status', ['resolved', 'cancelled'])->count(),
+                'resolved_emergencies' => EmergencyLog::where('status', 'resolved')->count(),
             ],
         ];
     }
 
-    public function getLocation()
-    {
-        $this->dispatch('request-geolocation');
-    }
-
-    public function handleLocationReceived($data)
-    {
-        $this->latitude = $data['latitude'];
-        $this->longitude = $data['longitude'];
-        $this->locationEnabled = true;
-        $this->error = null;
-    }
-
-    public function handleLocationError($data)
-    {
-        $this->error = is_array($data) ? $data['error'] : $data;
-        $this->locationEnabled = false;
-    }
-
-    public function triggerEmergency(): void
-    {
-        $this->processing = true;
-        $this->error = null;
-        $this->response = null;
-
-        try {
-            if (!$this->latitude || !$this->longitude) {
-                throw new \Exception('Lokasi diperlukan. Silakan aktifkan akses lokasi Anda.');
-            }
-
-            $request = new EmergencyRequestDTO(
-                userId: auth()->id(),
-                latitude: $this->latitude,
-                longitude: $this->longitude,
-                emergencyType: $this->emergencyType,
-                notes: $this->notes,
-            );
-
-            $emergencyService = app(EmergencyResponseService::class);
-            $this->response = $emergencyService->processEmergencyTrigger($request);
-
-            $this->reset(['emergencyType', 'notes']);
-        } catch (\Exception $e) {
-            $this->error = $e->getMessage();
-        } finally {
-            $this->processing = false;
-        }
-    }
-
     public function resolveEmergency(int $logId)
     {
-        $log = EmergencyLog::where('user_id', auth()->id())->findOrFail($logId);
-        $log->markAsResolved();
-    }
+        $log = EmergencyLog::findOrFail($logId);
+        
+        if(method_exists($log, 'markAsResolved')) {
+            $log->markAsResolved();
+        } else {
+            $log->status = 'resolved';
+            $log->resolved_at = now();
+            $log->save();
+        }
 
-    public function openContactModal()
-    {
-        $this->reset(['contact_name', 'contact_phone', 'contact_relationship', 'contact_email', 'contact_priority']);
-        $this->showContactForm = true;
-    }
-
-    public function addContact()
-    {
-        $this->validate([
-            'contact_name' => 'required|string|max:255',
-            'contact_phone' => 'required|string|max:20',
-            'contact_priority' => 'required|integer|between:1,3',
+        UserNotification::create([
+            'user_id' => $log->user_id,
+            'emergency_log_id' => $log->id,
+            'title' => 'Laporan Selesai Ditangani',
+            'message' => "Laporan darurat Anda (#{$log->id}) untuk jenis kejadian " . strtoupper($log->emergency_type ?? 'Lainnya') . " telah diselesaikan oleh agen kami. Terima kasih atas laporan Anda.",
+            'is_read' => false,
         ]);
 
-        EmergencyContact::create([
-            'user_id' => auth()->id(),
-            'name' => $this->contact_name,
-            'phone' => $this->contact_phone,
-            'relationship' => $this->contact_relationship,
-            'email' => $this->contact_email,
-            'priority' => $this->contact_priority,
-            'is_active' => true,
-        ]);
-
-        $this->showContactForm = false;
+        session()->flash('status', "Kasus #{$log->id} berhasil diselesaikan. Notifikasi telah dikirim ke pelapor.");
     }
 
-    public function deleteContact($id)
+    public function logout()
     {
-        EmergencyContact::where('user_id', auth()->id())->find($id)?->delete();
+        Auth::guard('web')->logout();
+        session()->invalidate();
+        session()->regenerateToken();
+        $this->redirect('/', navigate: true);
     }
 
     protected function getListeners()
     {
         return [
             'echo:emergency-channel,emergency.triggered' => 'handleIncomingEmergency',
-            'location-received' => 'handleLocationReceived',
-            'location-error' => 'handleLocationError'
         ];
     }
 
@@ -174,456 +91,298 @@ new #[Layout('layouts.app')] class extends Component
     }
 }; 
 ?>
-<div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 bg-slate-50 min-h-screen" x-data="{ openTrigger: false }">
-    
-    {{-- Leaflet Maps Assets diletakkan dengan aman menggunakan @assets bawaan Livewire --}}
+
+<div>
     @assets
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     @endassets
 
-    {{-- REAL-TIME TOAST ALERTS --}}
-    <div class="fixed top-5 right-5 z-[100] flex flex-col gap-3 w-full max-w-sm">
-        @foreach($alerts as $index => $alert)
-        <div class="bg-red-600 border border-red-500 text-white p-4 rounded-xl shadow-2xl flex justify-between items-start transition-all transform duration-300 animate-pulse">
-            <div class="flex-1">
-                <div class="flex items-center gap-2 font-bold text-sm mb-1">
-                    <span>🚨</span> <span>DARURAT MASUK!</span>
+    <div class="min-h-screen bg-slate-900 pb-12">
+        {{-- REAL-TIME TOAST ALERTS --}}
+        <div class="fixed top-20 right-5 z-[100] flex flex-col gap-3 w-full max-w-sm">
+            @foreach($alerts as $index => $alert)
+            <div class="bg-red-600 border border-red-500 text-white p-4 rounded-xl shadow-2xl flex justify-between items-start transition-all transform duration-300 animate-pulse">
+                <div class="flex-1">
+                    <div class="flex items-center gap-2 font-bold text-sm mb-1">
+                        <span>🚨</span> <span>DARURAT MASUK!</span>
+                    </div>
+                    <p class="text-xs font-semibold opacity-90">Tipe: {{ ucfirst($alert['type']) }}</p>
+                    <p class="text-[11px] opacity-75 mt-1">Koordinat: {{ $alert['latitude'] }}, {{ $alert['longitude'] }}</p>
                 </div>
-                <p class="text-xs font-semibold opacity-90">Tipe: {{ ucfirst($alert['type']) }}</p>
-                <p class="text-[11px] opacity-75 mt-1">Koordinat: {{ $alert['latitude'] }}, {{ $alert['longitude'] }}</p>
+                <button wire:click="closeAlert({{ $index }})" class="text-white hover:text-red-200 font-bold text-lg leading-none">&times;</button>
             </div>
-            <button wire:click="closeAlert({{ $index }})" class="text-white hover:text-red-200 font-bold text-lg leading-none">&times;</button>
+            @endforeach
         </div>
-        @endforeach
-    </div>
 
-    {{-- HEADER SECTION --}}
-    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-        <div>
-            <h1 class="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">Sistem Panel Darurat</h1>
-            <p class="text-slate-500 text-sm mt-1">Pantau riwayat, lokasi kejadian aktif, dan kelola kontak darurat Anda.</p>
-        </div>
-        <button
-            @click="openTrigger = true"
-            class="w-full sm:w-auto bg-gradient-to-r from-red-600 to-rose-600 text-white px-6 py-3.5 rounded-xl font-bold shadow-md hover:shadow-lg hover:from-red-700 hover:to-rose-700 transition duration-200 flex items-center justify-center gap-2 group">
-            <span class="text-lg group-hover:scale-110 transition duration-200">🚨</span> KIRIM SINYAL DARURAT
-        </button>
-    </div>
-
-    {{-- STATS CARDS GRID --}}
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-        <div class="bg-white border-l-4 border-blue-500 p-5 rounded-xl shadow-sm flex justify-between items-center">
-            <div>
-                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Laporan</h3>
-                <p class="text-3xl font-black text-slate-800 mt-1">{{ $stats['total_emergencies'] }}</p>
-            </div>
-            <div class="p-3 bg-blue-50 rounded-lg text-blue-500 text-xl font-bold">📊</div>
-        </div>
-        <div class="bg-white border-l-4 border-amber-500 p-5 rounded-xl shadow-sm flex justify-between items-center">
-            <div>
-                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Kasus Aktif</h3>
-                <div class="flex items-center gap-2 mt-1">
-                    <p class="text-3xl font-black text-slate-800">{{ $stats['active_emergencies'] }}</p>
-                    @if($stats['active_emergencies'] > 0)
-                        <span class="flex h-3 w-3 relative">
-                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                            <span class="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
-                        </span>
-                    @endif
+        {{-- TOPBAR --}}
+        <div class="bg-slate-950/90 backdrop-blur-md px-4 py-4 sm:px-8 shadow-md flex justify-between items-center border-b border-slate-800 mb-8 sticky top-0 z-50">
+            <div class="flex items-center gap-3">
+                <div class="p-1.5 rounded-lg bg-red-600 text-white shadow-lg shadow-red-600/30">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-6 h-6">
+                        <path fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" clip-rule="evenodd" />
+                    </svg>
                 </div>
+                <span class="text-xl font-bold text-white tracking-tight">ERA <span class="text-slate-400 font-medium">Log Panel</span></span>
             </div>
-            <div class="p-3 bg-amber-50 rounded-lg text-amber-500 text-xl font-bold">⏳</div>
-        </div>
-        <div class="bg-white border-l-4 border-emerald-500 p-5 rounded-xl shadow-sm flex justify-between items-center">
-            <div>
-                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Selesai Ditangani</h3>
-                <p class="text-3xl font-black text-slate-800 mt-1">{{ $stats['resolved_emergencies'] }}</p>
-            </div>
-            <div class="p-3 bg-emerald-50 rounded-lg text-emerald-500 text-xl font-bold">✅</div>
-        </div>
-    </div>
-
-    {{-- MAIN TWO-COLUMN DASHBOARD LAYOUT --}}
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {{-- LEFT COLUMN: MAP & LOGS LIST --}}
-        <div class="lg:col-span-2 space-y-6">
             
-            {{-- MAP DISPLAY CARD --}}
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
-                <div class="flex justify-between items-center mb-3 px-2">
-                    <h2 class="font-bold text-slate-800 flex items-center gap-2">
-                        🗺️ Pemetaan Lokasi Kejadian <span class="text-xs font-normal text-slate-400">(Halaman ini)</span>
-                    </h2>
+            <div class="flex items-center gap-4">
+                
+                {{-- MENU MASTER DATA --}}
+                <div class="relative" x-data="{ openMaster: false }">
+                    <button @click="openMaster = !openMaster" @click.outside="openMaster = false" class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-800 transition text-slate-300 hover:text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>
+                        <span class="text-sm font-semibold hidden sm:block">Master Data</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
+                    </button>
+
+                    <div x-show="openMaster" x-transition.opacity style="display: none;" class="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-[600] py-2">
+                        <div class="px-4 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Fasilitas</div>
+                        <a href="{{ route('admin.facilities') }}" wire:navigate class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 hover:text-green-600 transition">🏥 Rumah Sakit</a>
+                        <a href="{{ route('admin.facilities') }}" wire:navigate class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 hover:text-blue-600 transition">🚓 Kepolisian</a>
+                        <a href="{{ route('admin.facilities') }}" wire:navigate class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 hover:text-orange-600 transition">🚒 Pemadam Kebakaran</a>
+                        
+                        <div class="border-t border-slate-100 my-1"></div>
+                        <div class="px-4 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider">Pengguna</div>
+                        <a href="{{ route('admin.users') }}" wire:navigate class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 hover:text-indigo-600 transition">👥 Data Warga / Reporter</a>
+                    </div>
                 </div>
-                <div wire:ignore id="history-map" class="w-full h-[400px] rounded-xl border border-slate-200 z-10 relative shadow-inner"></div>
+
+                <div class="h-6 w-px bg-slate-700 mx-1"></div>
+
+                {{-- MENU PROFIL --}}
+                <div class="relative" x-data="{ openProfile: false }">
+                    <button @click="openProfile = !openProfile" @click.outside="openProfile = false" class="flex items-center gap-2 bg-slate-800/50 p-1.5 pr-3 rounded-full hover:bg-slate-700 transition border border-slate-700">
+                        <div class="w-7 h-7 bg-red-600 rounded-full flex items-center justify-center text-white font-bold text-xs">
+                            {{ substr(Auth::user()->name ?? 'A', 0, 1) }}
+                        </div>
+                        <span class="text-sm font-semibold text-slate-300 hidden sm:block">Admin</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 text-slate-400"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
+                    </button>
+
+                    <div x-show="openProfile" x-transition.opacity style="display: none;" class="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-[600]">
+                        <div class="px-4 py-3 border-b border-slate-100 bg-slate-50">
+                            <p class="text-sm text-slate-900 font-bold truncate">{{ Auth::user()->name }}</p>
+                            <p class="text-xs text-slate-500 truncate">{{ Auth::user()->email }}</p>
+                        </div>
+                        <a href="/profile" wire:navigate class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" /></svg> Profil Sistem
+                        </a>
+                        
+                        <button wire:click="logout" class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2 border-t border-slate-100 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15M12 9l-3 3m0 0 3 3m-3-3h12.75" /></svg> Keluar Penuh
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            {{-- Pesan Status Penyelesaian --}}
+            @if (session('status'))
+                <div class="mb-6 bg-emerald-500 border border-emerald-400 p-4 rounded-xl shadow-lg flex justify-between items-start animate-bounce text-white">
+                    <div class="flex gap-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                        <div>
+                            <h3 class="font-bold text-sm">Aksi Berhasil!</h3>
+                            <p class="text-xs text-emerald-100 mt-0.5">{{ session('status') }}</p>
+                        </div>
+                    </div>
+                </div>
+            @endif
+
+            {{-- STATS CARDS --}}
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+                <div class="bg-slate-800 border-l-4 border-blue-500 p-5 rounded-2xl shadow-lg flex justify-between items-center">
+                    <div>
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Laporan</h3>
+                        <p class="text-3xl font-black text-white mt-1">{{ $stats['total_emergencies'] }}</p>
+                    </div>
+                    <div class="p-3 bg-slate-700/50 rounded-xl text-blue-400 text-xl font-bold">📊</div>
+                </div>
+                <div class="bg-slate-800 border-l-4 border-amber-500 p-5 rounded-2xl shadow-lg flex justify-between items-center">
+                    <div>
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Kasus Aktif (Seluruh Sistem)</h3>
+                        <div class="flex items-center gap-2 mt-1">
+                            <p class="text-3xl font-black text-white">{{ $stats['active_emergencies'] }}</p>
+                            @if($stats['active_emergencies'] > 0)
+                                <span class="flex h-3 w-3 relative">
+                                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                                    <span class="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                                </span>
+                            @endif
+                        </div>
+                    </div>
+                    <div class="p-3 bg-slate-700/50 rounded-xl text-amber-400 text-xl font-bold">⏳</div>
+                </div>
+                <div class="bg-slate-800 border-l-4 border-emerald-500 p-5 rounded-2xl shadow-lg flex justify-between items-center">
+                    <div>
+                        <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">Selesai Ditangani</h3>
+                        <p class="text-3xl font-black text-white mt-1">{{ $stats['resolved_emergencies'] }}</p>
+                    </div>
+                    <div class="p-3 bg-slate-700/50 rounded-xl text-emerald-400 text-xl font-bold">✅</div>
+                </div>
             </div>
 
-            {{-- EMERGENCY LOGS CARD --}}
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
-                <h2 class="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2">📜 Riwayat Laporan</h2>
+            <div class="space-y-6">
+                {{-- MAP DISPLAY --}}
+                <div class="bg-slate-800 rounded-3xl shadow-xl border border-slate-700 p-4 overflow-hidden">
+                    <div class="flex justify-between items-center mb-3 px-2">
+                        <h2 class="font-bold text-white flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5 text-red-500"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" /></svg>
+                            Pemetaan Historis Kejadian Seluruh Wilayah
+                        </h2>
+                    </div>
+                    <div wire:ignore id="history-map" class="w-full h-[350px] sm:h-[450px] rounded-2xl border border-slate-900 z-10 relative shadow-inner"></div>
+                </div>
 
-                <div class="space-y-4">
-                    @forelse($logs as $log)
-                    <div class="border rounded-xl p-4 transition duration-150 hover:bg-slate-50 {{ $log->status === 'triggered' ? 'border-red-200 bg-red-50/40' : 'border-slate-100' }}">
-                        <div class="flex flex-col sm:flex-row justify-between items-start gap-4">
-                            <div class="flex-1 space-y-2">
-                                <div class="flex flex-wrap items-center gap-2">
-                                    <span class="font-bold text-slate-700">#{{ $log->id }}</span>
-                                    <span class="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider
-                                        @if($log->status === 'triggered') bg-red-100 text-red-700 border border-red-200
-                                        @elseif($log->status === 'contacted') bg-amber-100 text-amber-700 border border-amber-200
-                                        @elseif($log->status === 'resolved') bg-emerald-100 text-emerald-700 border border-emerald-200
-                                        @else bg-slate-100 text-slate-700
-                                        @endif">
-                                        {{ $log->status }}
-                                    </span>
-                                    @if($log->emergency_type)
-                                    <span class="px-2.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-100 rounded-full text-xs font-medium">
-                                        {{ ucfirst($log->emergency_type) }}
-                                    </span>
+                {{-- EMERGENCY LOGS CARD --}}
+                <div class="bg-slate-800 rounded-3xl shadow-xl border border-slate-700 p-6 sm:p-8">
+                    <h2 class="text-xl font-extrabold text-white mb-6 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6 text-slate-400"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+                        Tabel Log Laporan Warga
+                    </h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        @forelse($logs as $log)
+                        <div class="border rounded-2xl p-5 transition duration-150 {{ $log->status === 'triggered' ? 'border-red-500/50 bg-red-950/20' : 'border-slate-700 bg-slate-900/50 hover:bg-slate-700/50' }}">
+                            <div class="flex flex-col h-full justify-between gap-4">
+                                <div class="space-y-3">
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-black text-slate-300">#{{ $log->id }}</span>
+                                            <span class="text-xs font-semibold text-slate-400">👤 {{ $log->user->name ?? 'User '.$log->user_id }}</span>
+                                        </div>
+                                        <span class="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest
+                                            @if($log->status === 'triggered') bg-red-500/20 text-red-400 border border-red-500/30
+                                            @elseif($log->status === 'contacted') bg-amber-500/20 text-amber-400 border border-amber-500/30
+                                            @elseif($log->status === 'resolved') bg-emerald-500/20 text-emerald-400 border border-emerald-500/30
+                                            @else bg-slate-700 text-slate-300
+                                            @endif">
+                                            {{ $log->status }}
+                                        </span>
+                                    </div>
+
+                                    <div>
+                                        <div class="inline-block px-2.5 py-1 mb-2 bg-slate-800 text-blue-400 border border-slate-700 rounded-lg text-xs font-bold uppercase">
+                                            {{ $log->emergency_type ?? 'Lainnya' }}
+                                        </div>
+                                        <div class="text-xs text-slate-400 space-y-1.5 font-medium">
+                                            <p class="flex items-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg> {{ $log->triggered_at->format('d M Y, H:i') }}</p>
+                                            <p class="flex items-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" /></svg> {{ number_format($log->latitude, 5) }}, {{ number_format($log->longitude, 5) }}</p>
+                                        </div>
+                                    </div>
+
+                                    @if($log->notes)
+                                    <p class="text-sm text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-800">
+                                        "{{ $log->notes }}"
+                                    </p>
                                     @endif
                                 </div>
 
-                                <div class="text-xs text-slate-500 space-y-1">
-                                    <p>📅 <strong>Waktu:</strong> {{ $log->triggered_at->format('Y-m-d H:i:s') }}</p>
-                                    <p>📍 <strong>Koordinat:</strong> {{ number_format($log->latitude, 6) }}, {{ number_format($log->longitude, 6) }}</p>
+                                <div class="flex gap-2 w-full mt-2 pt-4 border-t border-slate-700/50">
+                                    @if($log->latitude && $log->longitude)
+                                    <button onclick="window.focusEmergency({{ $log->latitude }}, {{ $log->longitude }}, {{ $log->id }})" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.565 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" /></svg> Fokus Peta
+                                    </button>
+                                    @endif
+
+                                    @if($log->status !== 'resolved' && $log->status !== 'cancelled')
+                                    <button wire:click="resolveEmergency({{ $log->id }})" class="flex-1 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/50 text-xs font-bold py-2.5 px-3 rounded-xl transition flex justify-center items-center gap-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg> Selesaikan
+                                    </button>
+                                    @endif
                                 </div>
-
-                                @if($log->notes)
-                                <p class="text-sm text-slate-600 bg-white p-2.5 rounded-lg border border-slate-100 shadow-sm">
-                                    💬 {{ $log->notes }}
-                                </p>
-                                @endif
-
-                                @if($log->response_data)
-                                <div class="mt-2 text-[11px] text-slate-400 bg-slate-100/70 p-2 rounded-lg">
-                                    🤖 <strong>Keputusan Agen AI:</strong> 
-                                    Tingkat: <span class="font-semibold">{{ $log->response_data['severity_determined'] ?? 'N/A' }}</span>,
-                                    Fasilitas Ditemukan: <span class="font-semibold">{{ $log->response_data['facilities_found'] ?? 0 }}</span>
-                                </div>
-                                @endif
-                            </div>
-
-                            <div class="flex sm:flex-col gap-2 w-full sm:w-auto">
-                                @if($log->latitude && $log->longitude)
-                                <button
-                                    onclick="window.focusEmergency({{ $log->latitude }}, {{ $log->longitude }}, {{ $log->id }})"
-                                    class="flex-1 sm:w-32 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2 px-3 rounded-lg text-center shadow-sm transition">
-                                    📍 Lihat di Peta
-                                </button>
-                                @endif
-
-                                @if($log->status !== 'resolved' && $log->status !== 'cancelled')
-                                <button
-                                    wire:click="resolveEmergency({{ $log->id }})"
-                                    class="flex-1 sm:w-32 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-3 rounded-lg text-center shadow-sm transition">
-                                    ✓ Selesaikan
-                                </button>
-                                @endif
                             </div>
                         </div>
+                        @empty
+                        <div class="col-span-full text-center text-slate-500 py-16 border border-slate-700 border-dashed rounded-3xl bg-slate-900/30">
+                            <p class="text-sm font-medium">Belum ada riwayat log darurat masuk.</p>
+                        </div>
+                        @endforelse
                     </div>
-                    @empty
-                    <div class="text-center text-slate-400 py-12 border border-dashed rounded-xl">
-                        <p class="text-sm">Belum ada riwayat log darurat.</p>
-                    </div>
-                    @endforelse
-                </div>
-
-                <div class="mt-6 shadow-sm">
-                    {{ $logs->links() }}
+                    <div class="mt-8 text-white">{{ $logs->links() }}</div>
                 </div>
             </div>
         </div>
 
-        {{-- RIGHT COLUMN: EMERGENCY CONTACTS --}}
-        <div class="space-y-6">
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">👥 Kontak Darurat</h2>
-                    <button wire:click="openContactModal" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-semibold shadow-sm transition">
-                        + Tambah
-                    </button>
-                </div>
+        {{-- DATA BRIDGE UNTUK MAP --}}
+        @php
+            $bridgeData = collect($logs->items())->map(fn($log) => [
+                'id' => $log->id,
+                'latitude' => $log->latitude,
+                'longitude' => $log->longitude,
+                'status' => $log->status,
+                'emergency_type' => $log->emergency_type,
+                'notes' => $log->notes ?? '',
+                'triggered_at' => $log->triggered_at ? $log->triggered_at->format('Y-m-d H:i:s') : '',
+                'user_name' => $log->user->name ?? 'Unknown'
+            ])->toJson();
+        @endphp
+        <div id="map-data-bridge" data-markers="{{ $bridgeData }}" class="hidden"></div>
 
-                <div class="divide-y divide-slate-100 max-h-[500px] overflow-y-auto pr-1">
-                    @forelse($contacts as $contact)
-                    <div class="py-3.5 flex justify-between items-center group">
-                        <div class="space-y-1">
-                            <div class="flex items-center gap-2">
-                                <span class="font-bold text-slate-800 text-sm">{{ $contact->name }}</span>
-                                <span class="px-2 py-0.5 text-[9px] bg-slate-100 text-slate-600 font-extrabold rounded border border-slate-200">
-                                    Prioritas {{ $contact->priority }}
-                                </span>
-                            </div>
-                            <p class="text-xs text-slate-500 font-medium">📞 {{ $contact->phone }}</p>
-                            @if($contact->relationship)
-                            <p class="text-[11px] text-slate-400">Hubungan: {{ $contact->relationship }}</p>
-                            @endif
-                        </div>
-                        <button 
-                            wire:click="deleteContact({{ $contact->id }})" 
-                            wire:confirm="Apakah Anda yakin ingin menghapus kontak darurat ini?"
-                            class="text-slate-300 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition duration-150">
-                            🗑️
-                        </button>
-                    </div>
-                    @empty
-                    <div class="text-center text-slate-400 py-8">
-                        <p class="text-xs">Belum ada daftar kontak darurat.</p>
-                    </div>
-                    @endforelse
-                </div>
-            </div>
-        </div>
-    </div>
-
-    {{-- MODAL: TRIGGER EMERGENCY ALERT --}}
-    <div x-show="openTrigger" class="fixed inset-0 z-50 overflow-y-auto" style="display: none;" x-transition>
-        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" @click="openTrigger = false"></div>
-
-        <div class="relative min-h-screen flex items-center justify-center p-4">
-            <div class="relative bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 sm:p-8 border border-slate-100">
-                <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-xl font-black text-red-600 flex items-center gap-2">🚨 Form Sinyal Darurat</h2>
-                    <button @click="openTrigger = false" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
-                </div>
-
-                @if($error)
-                <div class="bg-red-50 border border-red-200 text-red-700 p-3.5 rounded-xl mb-4 text-xs font-semibold flex items-center gap-2">
-                    ⚠️ {{ $error }}
-                </div>
-                @endif
-
-                @if($response)
-                <div class="bg-emerald-50 border border-emerald-200 text-emerald-800 p-4 rounded-xl mb-5 text-sm space-y-1">
-                    <h3 class="font-bold text-emerald-900 mb-2 flex items-center gap-1.5">✅ Sinyal Berhasil Dikirim!</h3>
-                    <p class="text-xs">ID Laporan: <span class="font-mono font-bold">#{{ $response['emergency_id'] }}</span></p>
-                    <p class="text-xs">Tingkat Bahaya: <span class="font-bold uppercase text-red-600">{{ $response['severity'] }}</span></p>
-                    <p class="text-xs">Kontak Dinotifikasi: <span class="font-bold">{{ $response['contacts_notified'] }} Orang</span></p>
-                </div>
-                @endif
-
-                <div class="mb-5 bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <div class="flex items-center justify-between mb-3">
-                        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Status Lokasi GPS:</span>
-                        <span class="px-2 py-0.5 rounded-full text-[10px] font-black tracking-wide {{ $locationEnabled ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-red-100 text-red-700 border border-red-200' }}">
-                            {{ $locationEnabled ? '✓ AKTIF' : '✗ MATI' }}
-                        </span>
-                    </div>
-                    <button wire:click="getLocation" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-xs shadow-sm transition duration-150">
-                        🌐 Dapatkan Lokasi GPS Terbaru
-                    </button>
-                    @if($latitude && $longitude)
-                    <p class="text-[11px] text-slate-500 font-mono mt-2 text-center bg-white border border-slate-100 rounded p-1.5 shadow-sm">
-                        Lat: {{ number_format($latitude, 6) }}, Lng: {{ number_format($longitude, 6) }}
-                    </p>
-                    @endif
-                </div>
-
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1.5 uppercase">Tipe Keadaan Darurat</label>
-                        <select wire:model="emergencyType" class="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm shadow-sm focus:ring-2 focus:ring-red-500/20 focus:border-red-500 outline-none transition">
-                            <option value="">-- Pilih Jenis Kejadian --</option>
-                            <option value="medical">Keadaan Medis Kritis</option>
-                            <option value="accident">Kecelakaan Lalu Lintas</option>
-                            <option value="cardiac">Serangan Jantung</option>
-                            <option value="breathing">Gangguan Pernapasan</option>
-                            <option value="injury">Luka Parah / Pendarahan</option>
-                            <option value="other">Lainnya</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1.5 uppercase">Catatan / Detail Tambahan</label>
-                        <textarea wire:model="notes" placeholder="Berikan informasi singkat kondisi korban atau lokasi spesifik..." class="w-full border border-slate-200 rounded-xl p-3 text-sm shadow-sm focus:ring-2 focus:ring-red-500/20 focus:border-red-500 outline-none transition" rows="3"></textarea>
-                    </div>
-
-                    <div class="pt-2">
-                        <div wire:loading wire:target="triggerEmergency" class="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mb-3">
-                            <div class="h-full bg-red-600 animate-infinite w-full rounded-full"></div>
-                        </div>
-
-                        <button
-                            wire:click="triggerEmergency"
-                            class="w-full bg-red-600 hover:bg-red-700 text-white font-black py-4 px-6 rounded-xl shadow-lg disabled:opacity-40 disabled:cursor-not-allowed transition duration-150"
-                            wire:loading.attr="disabled"
-                            @disabled(!$locationEnabled || $processing)>
-                            <div class="flex items-center justify-center gap-2">
-                                <svg wire:loading wire:target="triggerEmergency" class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                </svg>
-                                <span>{{ $processing ? 'MEMPROSES RESPON...' : '🚨 KIRIM RESPON DARURAT SEKARANG' }}</span>
-                            </div>
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    {{-- MODAL: ADD EMERGENCY CONTACT --}}
-    @if($showContactForm)
-    <div class="fixed inset-0 z-50 overflow-y-auto">
-        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" wire:click="$set('showContactForm', false)"></div>
-        <div class="relative min-h-screen flex items-center justify-center p-4">
-            <div class="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-100">
-                <div class="flex justify-between items-center mb-5">
-                    <h2 class="text-lg font-bold text-slate-800">➕ Tambah Kontak Darurat</h2>
-                    <button wire:click="$set('showContactForm', false)" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
-                </div>
-
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1">Nama Lengkap</label>
-                        <input type="text" wire:model="contact_name" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition">
-                    </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1">No. Telepon / WhatsApp</label>
-                        <input type="text" wire:model="contact_phone" placeholder="Contoh: 08123456789" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition">
-                    </div>
-                    <div class="grid grid-cols-2 gap-3">
-                        <div>
-                            <label class="block text-xs font-bold text-slate-700 mb-1">Hubungan / Relasi</label>
-                            <input type="text" wire:model="contact_relationship" placeholder="Misal: Ibu, Ayah, Teman" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-bold text-slate-700 mb-1">Prioritas Hubungi</label>
-                            <select wire:model="contact_priority" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition">
-                                <option value="1">1 (Utama)</option>
-                                <option value="2">2 (Menengah)</option>
-                                <option value="3">3 (Cadangan)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div>
-                        <label class="block text-xs font-bold text-slate-700 mb-1">Email (Opsional)</label>
-                        <input type="email" wire:model="contact_email" class="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition">
-                    </div>
-
-                    <div class="flex gap-2 pt-2">
-                        <button wire:click="$set('showContactForm', false)" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold py-2.5 rounded-xl text-sm transition">Batal</button>
-                        <button wire:click="addContact" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl text-sm shadow-sm transition">Simpan Kontak</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    @endif
-
-    {{-- DATA BRIDGE UNTUK REAL-TIME LIVEWIRE MAP DATA UPDATE --}}
-    @php
-        $bridgeData = collect($logs->items())->map(fn($log) => [
-            'id' => $log->id,
-            'latitude' => $log->latitude,
-            'longitude' => $log->longitude,
-            'status' => $log->status,
-            'emergency_type' => $log->emergency_type,
-            'notes' => $log->notes ?? '',
-            'triggered_at' => $log->triggered_at ? $log->triggered_at->format('Y-m-d H:i:s') : ''
-        ])->toJson();
-    @endphp
-    <div id="map-data-bridge" data-markers="{{ $bridgeData }}" class="hidden"></div>
-
-    {{-- SCRIPTS AREA --}}
-    <script>
-        document.addEventListener('livewire:initialized', () => {
-            
-            Livewire.on('request-geolocation', () => {
-                if (navigator.geolocation) {
-                    navigator.geolocation.getCurrentPosition(
-                        (position) => {
-                            Livewire.dispatch('location-received', {
-                                data: { latitude: position.coords.latitude, longitude: position.coords.longitude }
-                            });
-                        },
-                        (error) => {
-                            Livewire.dispatch('location-error', {
-                                data: { error: 'Izin akses lokasi ditolak oleh perangkat.' }
-                            });
-                        }
-                    );
-                }
-            });
-
-            const mapContainer = document.getElementById('history-map');
-            if (mapContainer) {
-                window.emergencyMap = L.map('history-map').setView([-6.3927, 106.8286], 11);
-                window.emergencyMarkers = {};
-
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    maxZoom: 19,
-                    attribution: '© OpenStreetMap contributors'
-                }).addTo(window.emergencyMap);
-
-                window.updateMapMarkers = function() {
-                    const bridge = document.getElementById('map-data-bridge');
-                    if (!bridge) return;
-
-                    for (let id in window.emergencyMarkers) {
-                        window.emergencyMap.removeLayer(window.emergencyMarkers[id]);
-                    }
+        <script>
+            document.addEventListener('livewire:initialized', () => {
+                const mapContainer = document.getElementById('history-map');
+                if (mapContainer) {
+                    window.emergencyMap = L.map('history-map').setView([-6.3927, 106.8286], 11);
                     window.emergencyMarkers = {};
 
-                    const logs = JSON.parse(bridge.getAttribute('data-markers') || '[]');
-                    const bounds = [];
+                    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                        maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+                    }).addTo(window.emergencyMap);
 
-                    logs.forEach(log => {
-                        if (log.latitude && log.longitude) {
-                            let iconColor = log.status === 'triggered' ? '#ef4444' : (log.status === 'contacted' ? '#f59e0b' : '#10b981');
-                            let statusEmoji = log.status === 'resolved' ? '✅' : '🚨';
+                    window.updateMapMarkers = function() {
+                        const bridge = document.getElementById('map-data-bridge');
+                        if (!bridge) return;
 
-                            let popupContent = `
-                                <div class="text-xs p-1 font-sans" style="min-width: 160px;">
-                                    <strong class="text-sm text-slate-800">${statusEmoji} #${log.id} - ${log.emergency_type.toUpperCase()}</strong>
-                                    <p class="text-slate-400 text-[10px] my-1">${log.triggered_at}</p>
-                                    <hr class="my-1.5 border-slate-100">
-                                    <p class="text-slate-600"><strong>Status:</strong> <span class="uppercase font-bold" style="color:${iconColor}">${log.status}</span></p>
-                                    <p class="text-slate-600 mt-1"><strong>Catatan:</strong> ${log.notes || '-'}</p>
-                                </div>
-                            `;
+                        for (let id in window.emergencyMarkers) { window.emergencyMap.removeLayer(window.emergencyMarkers[id]); }
+                        window.emergencyMarkers = {};
 
-                            let marker = L.circleMarker([log.latitude, log.longitude], {
-                                radius: 9,
-                                fillColor: iconColor,
-                                color: '#ffffff',
-                                weight: 2,
-                                opacity: 1,
-                                fillOpacity: 0.85
-                            }).addTo(window.emergencyMap).bindPopup(popupContent);
+                        const logs = JSON.parse(bridge.getAttribute('data-markers') || '[]');
+                        const bounds = [];
 
-                            window.emergencyMarkers[log.id] = marker;
-                            bounds.push([log.latitude, log.longitude]);
-                        }
-                    });
+                        logs.forEach(log => {
+                            if (log.latitude && log.longitude) {
+                                let iconColor = log.status === 'triggered' ? '#ef4444' : (log.status === 'contacted' ? '#f59e0b' : '#10b981');
+                                let pulseClass = log.status === 'triggered' ? 'animation: pulse-red 2s infinite;' : '';
 
-                    if (bounds.length > 0) {
-                        window.emergencyMap.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
+                                let customIcon = L.divIcon({
+                                    className: 'custom-div-icon',
+                                    html: `<div style='background-color:${iconColor}; width:16px; height:16px; border-radius:50%; border:2px solid #1e293b; box-shadow: 0 0 10px ${iconColor}; ${pulseClass}'></div>`,
+                                    iconSize: [16, 16], iconAnchor: [8, 8]
+                                });
+
+                                let popupContent = `
+                                    <div class="text-xs p-1 font-sans" style="min-width: 160px;">
+                                        <strong class="text-sm text-slate-800">#${log.id} - ${log.emergency_type.toUpperCase()}</strong>
+                                        <p class="text-slate-400 text-[10px] my-1">${log.triggered_at} | 👤 ${log.user_name}</p>
+                                        <hr class="my-1.5 border-slate-100">
+                                        <p class="text-slate-600"><strong>Status:</strong> <span class="uppercase font-bold" style="color:${iconColor}">${log.status}</span></p>
+                                    </div>
+                                `;
+
+                                let marker = L.marker([log.latitude, log.longitude], {icon: customIcon}).addTo(window.emergencyMap).bindPopup(popupContent);
+                                window.emergencyMarkers[log.id] = marker;
+                                bounds.push([log.latitude, log.longitude]);
+                            }
+                        });
+
+                        if (bounds.length > 0) { window.emergencyMap.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 }); }
+                    };
+
+                    window.updateMapMarkers();
+                    Livewire.hook('morph.updated', ({ el }) => { if (el.id === 'map-data-bridge') { window.updateMapMarkers(); } });
+                }
+
+                window.focusEmergency = function(lat, lng, id) {
+                    if (window.emergencyMap) {
+                        window.emergencyMap.setView([lat, lng], 17, { animate: true, duration: 1.5 });
+                        if (window.emergencyMarkers[id]) { window.emergencyMarkers[id].openPopup(); }
+                        document.getElementById('history-map').scrollIntoView({ behavior: 'smooth', block: 'center' });
                     }
                 };
-
-                window.updateMapMarkers();
-
-                Livewire.hook('morph.updated', ({ el }) => {
-                    if (el.id === 'map-data-bridge') {
-                        window.updateMapMarkers();
-                    }
-                });
-            }
-
-            window.focusEmergency = function(lat, lng, id) {
-                if (window.emergencyMap) {
-                    window.emergencyMap.setView([lat, lng], 16, { animate: true, duration: 1 });
-                    if (window.emergencyMarkers[id]) {
-                        window.emergencyMarkers[id].openPopup();
-                    }
-                    document.getElementById('history-map').scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            };
-        });
-    </script>
+            });
+        </script>
+    </div>
 </div>

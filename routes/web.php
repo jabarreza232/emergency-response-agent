@@ -6,24 +6,30 @@ use Livewire\Volt\Volt;
 // use App\Livewire\EmergencyDashboard;
 // use App\Livewire\EmergencyTrigger;
 Volt::route('/', 'pages.auth.login');
+
 Route::view('dashboard', 'dashboard')
     ->middleware(['auth', 'verified'])
     ->name('dashboard');
 
-Route::view('profile', 'profile')
-    ->middleware(['auth'])
-    ->name('profile');
+
 Route::get('/test-dashboard', [EmergencyController::class, 'index']);
 Route::get('/test-trigger', [EmergencyController::class, 'trigger']);
-Volt::route('/emergency/dashboard', 'emergency_dashboard')
-    ->name('emergency.dashboard')
-    ->middleware(['auth']);
-Volt::route('/emergency/trigger', 'emergency_trigger')
-    ->name('emergency.trigger')
-    ->middleware(['auth']);
-Volt::route('/emergency/contacts', 'emergency_contacts')
-    ->name('emergency.contacts')
-    ->middleware(['auth']);
+
+Route::middleware(['auth'])->group(function () {
+    Route::view('profile', 'profile')
+        ->name('profile');
+    Volt::route('/emergency/dashboard', 'emergency_dashboard')
+        ->name('emergency.dashboard');
+    Volt::route('/reporter/dashboard', 'reporter_dashboard')
+        ->name('reporter.dashboard');
+    Volt::route('/emergency/trigger', 'emergency_trigger')
+        ->name('emergency.trigger');
+    Volt::route('/emergency/contacts', 'emergency_contacts')
+        ->name('emergency.contacts');
+
+    Volt::route('/admin/users', 'admin.user-management')->name('admin.users');
+    Volt::route('/admin/facilities', 'admin.facility-management')->name('admin.facilities');
+});
 require __DIR__ . '/auth.php';
 Route::get('/test-broadcast', function () {
     $data = [
