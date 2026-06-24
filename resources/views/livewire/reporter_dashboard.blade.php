@@ -2,6 +2,7 @@
 
 use Livewire\Volt\Component;
 use Livewire\Attributes\Layout;
+use Livewire\WithFileUploads;
 use App\Models\EmergencyLog;
 use App\Models\Hospital;
 use App\Models\PoliceStation;
@@ -11,10 +12,13 @@ use Illuminate\Support\Facades\Auth;
 
 new #[Layout('layouts.app')] class extends Component
 {
+    use WithFileUploads;
+
     public $latitude;
     public $longitude;
     public $emergency_type = '';
     public $notes;
+    public $attachment; 
     
     public $gps_status = 'Mencari sinyal GPS...';
     public $is_gps_locked = false;
@@ -29,6 +33,8 @@ new #[Layout('layouts.app')] class extends Component
     public $userHistory = []; 
     public $userNotifications = [];
 
+    public $latestNotifId = null; // Tambahkan pelacak notifikasi
+
     public function mount()
     {
         $this->hospitals = Hospital::where('is_active', true)->get(['id', 'name', 'latitude', 'longitude', 'type', 'phone']);
@@ -39,6 +45,26 @@ new #[Layout('layouts.app')] class extends Component
         $this->userHistory = EmergencyLog::where('user_id', Auth::id())->orderBy('created_at', 'desc')->get();
         
         $this->loadNotifications();
+        
+        // Set ID Notifikasi terakhir saat awal muat
+        $this->latestNotifId = collect($this->userNotifications)->max('id');
+    }
+
+    public function with(): array
+    {
+        // 1. REFRESH DATA NOTIFIKASI SETIAP POLLING (5 DETIK)
+        $this->loadNotifications();
+
+        // 2. DETEKSI NOTIFIKASI BARU UNTUK MEMAINKAN SUARA NOTIF
+        $currentMaxNotifId = collect($this->userNotifications)->max('id');
+        if ($this->latestNotifId !== null && $currentMaxNotifId > $this->latestNotifId) {
+            $this->dispatch('play-notif-sound');
+            $this->latestNotifId = $currentMaxNotifId;
+        } elseif ($this->latestNotifId === null) {
+            $this->latestNotifId = $currentMaxNotifId;
+        }
+
+        return [];
     }
 
     public function loadNotifications()
@@ -61,10 +87,18 @@ new #[Layout('layouts.app')] class extends Component
             'longitude' => 'required|numeric',
             'emergency_type' => 'required|string',
             'notes' => 'nullable|string|max:500',
+            'attachment' => 'nullable|image|max:5120', 
         ], [
             'latitude.required' => 'Sinyal GPS belum terkunci. Tunggu beberapa saat.',
             'emergency_type.required' => 'Pilih jenis darurat!',
+            'attachment.image' => 'File harus berupa gambar (JPG, PNG).',
+            'attachment.max' => 'Ukuran gambar maksimal 5MB.',
         ]);
+
+        $attachmentPath = null;
+        if ($this->attachment) {
+            $attachmentPath = $this->attachment->store('attachments', 'public');
+        }
 
         $log = EmergencyLog::create([
             'user_id' => Auth::id(),
@@ -72,6 +106,7 @@ new #[Layout('layouts.app')] class extends Component
             'longitude' => $this->longitude,
             'emergency_type' => $this->emergency_type,
             'notes' => $this->notes,
+            'attachment' => $attachmentPath, 
             'status' => 'triggered',
             'triggered_at' => now(),
         ]);
@@ -80,10 +115,14 @@ new #[Layout('layouts.app')] class extends Component
 
         $this->showEmergencyModal = false;
         session()->flash('status', 'Laporan Darurat Berhasil Dikirim! Tim kami segera merespons.');
-        $this->reset(['notes', 'emergency_type']);
+        
+        $this->reset(['notes', 'emergency_type', 'attachment']);
 
         $this->dispatch('emergency-created', [
-            'lat' => $log->latitude, 'lng' => $log->longitude, 'type' => $log->emergency_type, 'status' => $log->status
+            'lat' => $log->latitude, 
+            'lng' => $log->longitude, 
+            'type' => $log->emergency_type, 
+            'status' => $log->status
         ]);
     }
 
@@ -112,11 +151,50 @@ new #[Layout('layouts.app')] class extends Component
         </style>
     @endassets
 
-    <div class="h-screen w-full bg-slate-900 overflow-hidden relative" 
-         x-data="{ showSidebar: false, showHistory: false, showNotifications: false, openProfile: false, activeTab: 'hospital' }">
+    <div class="h-screen w-full bg-slate-900 overflow-hidden relative" wire:poll.5s
+         x-data="{ 
+            showSidebar: false, 
+            showHistory: false, 
+            showNotifications: false, 
+            openProfile: false, 
+            activeTab: 'hospital',
+            audioUnlocked: false,
+            
+            unlockAudio() {
+                if (this.audioUnlocked) return;
+                this.audioUnlocked = true; 
+                
+                let notifSound = document.getElementById('notif-sound');
+                if (notifSound) {
+                    notifSound.muted = true;
+                    notifSound.play().then(() => {
+                        notifSound.pause();
+                        notifSound.currentTime = 0;
+                        notifSound.muted = false; 
+                    }).catch(e => {});
+                }
+            },
+
+            playNotifSound() {
+                let notifSound = document.getElementById('notif-sound');
+                if (notifSound) {
+                    notifSound.muted = false;
+                    notifSound.currentTime = 0;
+                    notifSound.play().catch(e => console.warn('Suara notif diblokir browser.'));
+                }
+            }
+         }"
+         @click.window="unlockAudio()"
+         @play-notif-sound.window="playNotifSound()">
         
         <div id="map" class="absolute inset-0 z-0" wire:ignore></div>
 
+        {{-- Audio Notifikasi --}}
+        <audio id="notif-sound" preload="auto">
+            <source src="{{ asset('audio/notif.mp3') }}" type="audio/mpeg">
+        </audio>
+
+        {{-- TOPBAR --}}
         <div class="absolute top-0 w-full z-[500] bg-slate-950/90 backdrop-blur-md px-4 py-3 sm:px-6 shadow-md flex justify-between items-center border-b border-slate-800">
             <div class="flex items-center gap-3">
                 <div class="p-1.5 rounded-lg bg-red-600 text-white shadow-lg shadow-red-600/30">
@@ -126,15 +204,18 @@ new #[Layout('layouts.app')] class extends Component
             </div>
             
             <div class="flex items-center gap-1 sm:gap-3">
-                
                 <button @click="showHistory = true" class="p-2 text-slate-300 hover:text-white transition rounded-full hover:bg-slate-800">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Zm3.75 11.625a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" /></svg>
                 </button>
 
+                {{-- TOMBOL NOTIFIKASI BESERTA INDIKATOR DOT --}}
                 <button @click="showNotifications = true" class="relative p-2 text-slate-300 hover:text-white transition rounded-full hover:bg-slate-800">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
                     @if(collect($userNotifications)->where('is_read', false)->count() > 0)
-                        <span class="absolute top-1.5 right-1.5 flex h-2.5 w-2.5"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500 border border-slate-900"></span></span>
+                        <span class="absolute top-1.5 right-1.5 flex h-2.5 w-2.5">
+                            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500 border border-slate-900"></span>
+                        </span>
                     @endif
                 </button>
 
@@ -290,6 +371,7 @@ new #[Layout('layouts.app')] class extends Component
             </div>
         </div>
 
+   {{-- MODAL RIWAYAT --}}
         <div x-show="showHistory" style="display: none;" class="fixed inset-0 z-[600] flex justify-center items-center p-4">
             <div x-show="showHistory" x-transition.opacity class="absolute inset-0 bg-slate-950/60 backdrop-blur-sm" @click="showHistory = false"></div>
             <div x-show="showHistory" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" class="relative w-full max-w-md bg-white rounded-2xl shadow-2xl flex flex-col max-h-[85vh]">
@@ -300,9 +382,30 @@ new #[Layout('layouts.app')] class extends Component
                 <div class="p-2 overflow-y-auto flex-1 bg-white">
                     @forelse($userHistory as $history)
                         <div class="bg-white p-4 rounded-xl border border-slate-100 mb-2 shadow-sm">
-                            <div class="flex justify-between items-start mb-2"><span class="font-bold text-slate-800 uppercase text-sm flex items-center gap-2"><div class="w-2 h-2 rounded-full {{ $history->status === 'resolved' ? 'bg-slate-400' : 'bg-red-500 animate-pulse' }}"></div>{{ $history->emergency_type }}</span><span class="text-[10px] text-slate-400 font-medium">{{ \Carbon\Carbon::parse($history->triggered_at)->diffForHumans() }}</span></div>
+                            <div class="flex justify-between items-start mb-2">
+                                <span class="font-bold text-slate-800 uppercase text-sm flex items-center gap-2">
+                                    <div class="w-2 h-2 rounded-full {{ $history->status === 'resolved' ? 'bg-slate-400' : 'bg-red-500 animate-pulse' }}"></div>
+                                    {{ $history->emergency_type }}
+                                </span>
+                                <span class="text-[10px] text-slate-400 font-medium">{{ \Carbon\Carbon::parse($history->triggered_at)->diffForHumans() }}</span>
+                            </div>
+                            
                             <p class="text-xs text-slate-600 mb-3">{{ $history->notes ?: 'Tidak ada catatan tambahan.' }}</p>
-                            <div class="flex justify-between items-center pt-2 border-t border-slate-50"><span class="text-[11px] font-bold px-2 py-1 rounded {{ $history->status === 'resolved' ? 'bg-slate-100 text-slate-500' : 'bg-red-50 text-red-600' }}">STATUS: {{ strtoupper($history->status) }}</span><button class="text-[11px] text-indigo-600 font-semibold" @click="showHistory = false; if(leafletMap) leafletMap.flyTo([{{ $history->latitude }}, {{ $history->longitude }}], 17);">Lihat Lokasi</button></div>
+                            
+                            {{-- BLOK MENAMPILKAN GAMBAR (ATTACHMENT) --}}
+                            @if($history->attachment)
+                                <div class="mb-3">
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Bukti Foto:</p>
+                                    <a href="{{ Storage::url($history->attachment) }}" target="_blank">
+                                        <img src="{{ Storage::url($history->attachment) }}" alt="Lampiran Laporan" class="w-full h-32 object-cover rounded-lg border border-slate-200 shadow-sm hover:opacity-90 transition">
+                                    </a>
+                                </div>
+                            @endif
+
+                            <div class="flex justify-between items-center pt-2 border-t border-slate-50">
+                                <span class="text-[11px] font-bold px-2 py-1 rounded {{ $history->status === 'resolved' ? 'bg-slate-100 text-slate-500' : 'bg-red-50 text-red-600' }}">STATUS: {{ strtoupper($history->status) }}</span>
+                                <button class="text-[11px] text-indigo-600 font-semibold" @click="showHistory = false; if(leafletMap) leafletMap.flyTo([{{ $history->latitude }}, {{ $history->longitude }}], 17);">Lihat Lokasi</button>
+                            </div>
                         </div>
                     @empty
                         <div class="text-center p-8"><p class="text-slate-500 text-sm">Belum ada riwayat laporan darurat.</p></div>
@@ -316,7 +419,8 @@ new #[Layout('layouts.app')] class extends Component
             <div x-show="open" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 translate-y-full sm:translate-y-8 sm:scale-95" x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100" x-transition:leave="transition ease-in duration-200" x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100" x-transition:leave-end="opacity-0 translate-y-full sm:translate-y-8 sm:scale-95" class="relative w-full max-w-lg bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
                 <div class="p-5 sm:p-6 overflow-y-auto">
                     <div class="flex justify-between items-center mb-6"><div><h2 class="text-2xl font-extrabold text-slate-900 tracking-tight">Kirim Sinyal SOS</h2><p class="text-slate-500 text-xs mt-1">Sistem melacak koordinat Anda secara otomatis.</p></div><button @click="open = false" class="p-2 bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button></div>
-                    <form wire:submit="submitEmergency">
+                        
+                    <form wire:submit="submitEmergency" enctype="multipart/form-data">
                         <div class="mb-6 p-3 rounded-xl border {{ $is_gps_locked ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200' }} flex items-center gap-3">
                             @if($is_gps_locked)
                                 <span class="flex h-3 w-3 relative"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span></span><div class="text-xs"><span class="font-bold text-green-700 block">Koordinat Terkunci</span><span class="text-green-600">{{ $latitude }}, {{ $longitude }}</span></div>
@@ -337,6 +441,41 @@ new #[Layout('layouts.app')] class extends Component
                         <div class="mb-6">
                             <label for="notes" class="block text-sm font-bold text-slate-700 mb-2">Keterangan Tambahan</label>
                             <textarea wire:model="notes" id="notes" rows="2" class="block w-full border-slate-200 bg-slate-50 focus:bg-white focus:border-red-500 focus:ring-red-500 rounded-xl shadow-sm text-sm p-3" placeholder="Opsional: Jelaskan situasi..."></textarea>
+                        </div>
+                        {{-- FIELD UPLOAD LAMPIRAN --}}
+                        <div class="mb-6">
+                            <label class="block text-sm font-bold text-slate-700 mb-2">Foto Kejadian (Opsional)</label>
+                            
+                            <div class="flex items-center justify-center w-full">
+                                <label for="dropzone-file" class="flex flex-col items-center justify-center w-full h-24 border-2 border-slate-300 border-dashed rounded-xl cursor-pointer bg-slate-50 hover:bg-slate-100 transition">
+                                    
+                                    <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                        {{-- Tampilkan preview jika ada gambar yang diunggah sementara --}}
+                                        @if ($attachment)
+                                            <div class="text-green-600 font-bold text-xs flex items-center gap-1">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+                                                Gambar siap dikirim
+                                            </div>
+                                            <p class="text-[10px] text-slate-500 mt-1 truncate max-w-[200px]">{{ $attachment->getClientOriginalName() }}</p>
+                                        @else
+                                            <svg class="w-6 h-6 mb-2 text-slate-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16">
+                                                <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/>
+                                            </svg>
+                                            <p class="mb-1 text-xs text-slate-500"><span class="font-semibold">Klik untuk upload</span> foto lokasi</p>
+                                            <p class="text-[10px] text-slate-400">PNG atau JPG (Maks. 5MB)</p>
+                                        @endif
+                                    </div>
+
+                                    <input id="dropzone-file" type="file" wire:model="attachment" accept="image/png, image/jpeg" class="hidden" />
+                                </label>
+                            </div>
+                            
+                            {{-- Loading Upload Indicator --}}
+                            <div wire:loading wire:target="attachment" class="text-blue-600 text-xs font-bold mt-2 animate-pulse flex items-center gap-1">
+                                <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Memuat foto...
+                            </div>
+                            
+                            <x-input-error :messages="$errors->get('attachment')" class="mt-1 text-xs" />
                         </div>
                         <button type="submit" wire:loading.attr="disabled" class="w-full py-4 bg-slate-950 border border-transparent rounded-xl font-black text-white uppercase tracking-widest hover:bg-slate-800 active:scale-[0.98] transition-all flex justify-center items-center gap-2 shadow-lg disabled:opacity-75 disabled:cursor-not-allowed">
                             <span wire:loading.remove wire:target="submitEmergency">PANGGIL BANTUAN SEKARANG</span>
@@ -400,10 +539,11 @@ new #[Layout('layouts.app')] class extends Component
                 });
             });
 
-            // FUNGSI UPDATE: Menerima tipe fasilitas (hospital, police, fire) untuk menyesuaikan data dan ikonnya
+            // FUNGSI UPDATE MENDETEKSI TIPE DARURAT DAN RADIUS 5KM
             function showFacilityOnMap(id, type) {
                 if(!leafletMap) return;
                 
+                // 1. Fokus Kamera Peta ke Laporan
                 let facilityArray = window.facilityData[type];
                 let item = facilityArray.find(h => h.id === id);
                 

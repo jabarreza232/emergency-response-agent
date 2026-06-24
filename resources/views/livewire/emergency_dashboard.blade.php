@@ -109,7 +109,7 @@ new #[Layout('layouts.app')] class extends Component
             array_pop($this->alerts);
         }
 
-        // Memicu event browser untuk membunyikan alarm di Frontend (Jika pakai WebSocket/Echo)
+        // Memicu event browser untuk membunyikan alarm di Frontend
         $this->dispatch('trigger-alarm');
     }
 
@@ -132,7 +132,7 @@ new #[Layout('layouts.app')] class extends Component
         <source src="{{ asset('audio/sirine.mp3') }}" type="audio/mpeg">
     </audio>
 
-    {{-- State Alpine untuk Sistem Alarm dengan Audio Unlocker Mutlak --}}
+    {{-- State Alpine untuk Sistem Alarm --}}
     <div class="min-h-screen bg-slate-900 pb-12" 
          x-data="{
             isAlarmRinging: false,
@@ -141,9 +141,7 @@ new #[Layout('layouts.app')] class extends Component
             
             unlockAudio() {
                 if (this.audioUnlocked) return;
-                
                 this.audioUnlocked = true; 
-                
                 let siren = document.getElementById('emergency-siren');
                 if (siren) {
                     siren.muted = true;
@@ -167,9 +165,7 @@ new #[Layout('layouts.app')] class extends Component
                         console.warn('Autoplay dicegah browser! Harap klik halaman.');
                         this.audioUnlocked = false; 
                     });
-                    
                     this.isAlarmRinging = true;
-                    
                     clearTimeout(this.alarmTimeout);
                     this.alarmTimeout = setTimeout(() => {
                         this.stopAlarm();
@@ -232,6 +228,7 @@ new #[Layout('layouts.app')] class extends Component
             </div>
             
             <div class="flex items-center gap-4">
+                
                 {{-- MENU MASTER DATA --}}
                 <div class="relative" x-data="{ openMaster: false }">
                     <button @click="openMaster = !openMaster" @click.outside="openMaster = false" class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-800 transition text-slate-300 hover:text-white">
@@ -349,7 +346,25 @@ new #[Layout('layouts.app')] class extends Component
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         @forelse($logs as $log)
-                        <div class="border rounded-2xl p-5 transition duration-150 {{ $log->status === 'triggered' ? 'border-red-500/50 bg-red-950/20' : 'border-slate-700 bg-slate-900/50 hover:bg-slate-700/50' }}">
+                        {{-- Elemen ini menempelkan state Alpine x-data khusus per baris (log) untuk fitur geocoding otomatis --}}
+                        <div x-data="{
+                                addressStr: 'Mencari alamat...',
+                                init() {
+                                    fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat={{ $log->latitude }}&lon={{ $log->longitude }}&zoom=18&addressdetails=1`)
+                                    .then(res => res.json())
+                                    .then(data => {
+                                        if(data && data.display_name) {
+                                            this.addressStr = data.display_name;
+                                        } else {
+                                            this.addressStr = 'Alamat tidak ditemukan';
+                                        }
+                                    }).catch(err => {
+                                        this.addressStr = 'Gagal memuat alamat';
+                                    });
+                                }
+                            }" 
+                            class="border rounded-2xl p-5 transition duration-150 {{ $log->status === 'triggered' ? 'border-red-500/50 bg-red-950/20' : 'border-slate-700 bg-slate-900/50 hover:bg-slate-700/50' }}">
+                            
                             <div class="flex flex-col h-full justify-between gap-4">
                                 <div class="space-y-3">
                                     <div class="flex flex-wrap items-center justify-between gap-2">
@@ -373,7 +388,15 @@ new #[Layout('layouts.app')] class extends Component
                                         </div>
                                         <div class="text-xs text-slate-400 space-y-1.5 font-medium">
                                             <p class="flex items-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg> {{ $log->triggered_at->format('d M Y, H:i') }}</p>
-                                            <p class="flex items-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" /></svg> {{ number_format($log->latitude, 5) }}, {{ number_format($log->longitude, 5) }}</p>
+                                            
+                                            {{-- Field Alamat Hasil Geocoding --}}
+                                            <div class="flex items-start gap-2 bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/50">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" /></svg> 
+                                                <div class="flex flex-col">
+                                                    <span class="font-mono text-[10px] opacity-75 mb-0.5">{{ number_format($log->latitude, 5) }}, {{ number_format($log->longitude, 5) }}</span>
+                                                    <span x-text="addressStr" class="text-slate-300 italic leading-snug"></span>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
 
@@ -381,6 +404,17 @@ new #[Layout('layouts.app')] class extends Component
                                     <p class="text-sm text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-800">
                                         "{{ $log->notes }}"
                                     </p>
+                                    @endif
+
+                                    {{-- TAMPILAN GAMBAR LAMPIRAN DI ADMIN --}}
+                                    @if($log->attachment)
+                                    <div class="mt-3">
+                                        <p class="text-[10px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1">
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+                                            Lampiran Kejadian:
+                                        </p>
+                                        <img src="{{ Storage::url($log->attachment) }}" alt="Lampiran Darurat" class="w-full h-40 object-cover rounded-xl border border-slate-700 shadow-md">
+                                    </div>
                                     @endif
                                 </div>
 

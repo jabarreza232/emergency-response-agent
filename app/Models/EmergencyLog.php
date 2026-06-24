@@ -5,23 +5,25 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+
 class EmergencyLog extends Model
 {
-use HasFactory;
- 
+    use HasFactory;
+
     protected $fillable = [
         'user_id',
         'latitude',
         'longitude',
         'emergency_type',
         'notes',
+        'attachment',
         'status',
         'contacted_entities',
         'response_data',
         'triggered_at',
         'resolved_at',
     ];
- 
+
     protected function casts(): array
     {
         return [
@@ -33,7 +35,7 @@ use HasFactory;
             'resolved_at' => 'datetime',
         ];
     }
- 
+
     /**
      * Get the user that owns the emergency log.
      */
@@ -41,7 +43,7 @@ use HasFactory;
     {
         return $this->belongsTo(User::class);
     }
- 
+
     /**
      * Scope to get only active emergencies.
      */
@@ -49,7 +51,7 @@ use HasFactory;
     {
         return $query->whereIn('status', ['triggered', 'contacted']);
     }
- 
+
     /**
      * Scope to get resolved emergencies.
      */
@@ -57,7 +59,7 @@ use HasFactory;
     {
         return $query->where('status', 'resolved');
     }
- 
+
     /**
      * Mark emergency as resolved.
      */
@@ -68,7 +70,7 @@ use HasFactory;
             'resolved_at' => now(),
         ]);
     }
- 
+
     /**
      * Mark emergency as cancelled.
      */
@@ -78,4 +80,5 @@ use HasFactory;
             'status' => 'cancelled',
             'resolved_at' => now(),
         ]);
-    }}
+    }
+}
