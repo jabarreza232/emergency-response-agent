@@ -151,7 +151,7 @@ new #[Layout('layouts.app')] class extends Component
         </style>
     @endassets
 
-    <div class="h-screen w-full bg-slate-900 overflow-hidden relative" wire:poll.5s
+    <div class="h-screen w-full bg-slate-900 overflow-hidden relative"
          x-data="{ 
             showSidebar: false, 
             showHistory: false, 
